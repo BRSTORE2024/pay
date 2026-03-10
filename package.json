@@ -1,0 +1,48 @@
+{
+  "name": "youtube-autopay-bot",
+  "version": "2.0.0",
+  "description": "YouTube Auto Pay Bot by Sindu Saga",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node bot.js",
+    "headless": "cross-env HEADLESS=1 node bot.js",
+    "obfuscate": "uglifyjs bot.js -o bot.min.js -c -m && echo '✅ Bot berhasil diobfuscate! File: bot.min.js'",
+    "obfuscate:aggressive": "uglifyjs bot.js -o bot.min.js -c passes=3 -m --mangle-props keep_quoted && echo '✅ Obfuscate agresif selesai! File: bot.min.js'",
+    "build": "npm run obfuscate",
+    "prod": "cp bot.min.js bot.js && node bot.js",
+    "clean": "rm -rf TEMP && echo '✅ Folder TEMP dibersihkan'",
+    "preview": "node -e \"console.log('📋 Daftar script:\\n- npm start : Jalankan bot\\n- npm run headless : Jalankan mode headless\\n- npm run obfuscate : Obfuscate bot\\n- npm run prod : Jalankan hasil obfuscate')\""
+  },
+  "keywords": [
+    "youtube",
+    "premium",
+    "autopay",
+    "bot",
+    "puppeteer"
+  ],
+  "author": "Sindu Saga",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.2",
+    "dotenv": "^16.3.1",
+    "form-data": "^4.0.0",
+    "puppeteer": "^21.5.2",
+    "rimraf": "^5.0.5"
+  },
+  "devDependencies": {
+    "uglify-js": "^3.17.4",
+    "cross-env": "^7.0.3"
+  },
+  "engines": {
+    "node": ">=16.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sindusaga/youtube-autopay"
+  },
+  "bugs": {
+    "url": "https://github.com/sindusaga/youtube-autopay/issues"
+  },
+  "homepage": "https://github.com/sindusaga/youtube-autopay#readme"
+}
