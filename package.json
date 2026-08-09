@@ -4,7 +4,7 @@
   "description": "YouTube Premium Auto Pay & Checker by BR STORE",
   "main": "bot.min.js",
   "scripts": {
-    "start": "node bot.min.js",
+    "start": "xvfb-run node bot.min.js",
     "auto": "node bot.min.js --auto",
     "headless": "node bot.min.js --headless"
   },
