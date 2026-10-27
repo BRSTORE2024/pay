@@ -1,114 +1,187 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const { spawn } = require('child_process');
-const cors = require('cors'); // [BARU] Tambahan module CORS
+const { spawn, exec } = require('child_process');
+const cors = require('cors');
 
 const app = express();
-
-// [BARU] Mengaktifkan CORS agar request dari web panel tidak diblokir
 app.use(cors()); 
 app.use(express.json());
 
 const PORT = 4000; 
-const API_SECRET = "rahasia-brstore-2026"; 
-
 const akunFile = path.join(__dirname, 'AKUN.txt');
+
 if (!fs.existsSync(akunFile)) {
     fs.writeFileSync(akunFile, '', 'utf8');
 }
 
 let isRunning = false;
+let isManualStop = false;
+let currentProcess = null;
+let retryTimeout = null;
 let autoRetryCount = 0;
-const MAX_AUTO_RETRY = 2; // Batas pengulangan otomatis jika ada akun yang masih bandel/gagal
+const MAX_AUTO_RETRY = 2;
 
-// Fungsi Eksekusi & Antrean
+let liveLogs = [];
+function addLog(text) {
+    const timeStr = new Date().toLocaleTimeString('id-ID', { timeZone: 'Asia/Jakarta' });
+    const logLine = `[${timeStr}] ${text}`;
+    console.log(logLine);
+    liveLogs.push(logLine);
+    if (liveLogs.length > 150) liveLogs.shift();
+}
+
 function runBotProcess(isNewTrigger = false) {
     if (isNewTrigger) {
-        autoRetryCount = 0; // Reset hitungan jika ada orderan baru atau klik tombol retry manual
+        autoRetryCount = 0;
+        isManualStop = false;
+        if (retryTimeout) {
+            clearTimeout(retryTimeout);
+            retryTimeout = null;
+        }
     }
 
     if (isRunning) {
-        console.log(`? [QUEUE] Bot sedang sibuk. Menunggu giliran...`);
+        addLog(`? [QUEUE] Bot sedang berjalan. Menunggu antrean berikutnya...`);
         return;
     }
 
     try {
         if (!fs.existsSync(akunFile)) return;
-        
         const content = fs.readFileSync(akunFile, 'utf8');
-        // Filter baris kosong & komentar
         const accounts = content.split('\n').map(a => a.trim()).filter(a => a && !a.startsWith('//'));
         
         if (accounts.length === 0) {
+            addLog(`?? [INFO] AKUN.txt kosong. Tidak ada akun untuk diproses.`);
             autoRetryCount = 0;
             return;
         }
 
-        // Pengaman Anti-Infinite Loop (Mencegah VPS hang jika password akun salah/suspend)
         if (autoRetryCount > MAX_AUTO_RETRY) {
-            console.log(`\n?? [QUEUE] Batas Auto-Retry maksimal tercapai (${MAX_AUTO_RETRY}x pengulangan).`);
-            console.log(`?? Sisa ${accounts.length} akun dibiarkan di AKUN.txt. Silakan cek di Panel Admin untuk tindakan manual.`);
+            addLog(`?? [QUEUE] Batas Auto-Retry maksimal tercapai (${MAX_AUTO_RETRY}x). Sisa ${accounts.length} akun dibiarkan di AKUN.txt.`);
             return;
         }
 
         isRunning = true;
-        
+        isManualStop = false;
+
         if (autoRetryCount > 0) {
-            console.log(`\n?? [AUTO RETRY ${autoRetryCount}/${MAX_AUTO_RETRY}] Mencoba ulang ${accounts.length} akun yang belum sukses...`);
+            addLog(`?? [AUTO RETRY ${autoRetryCount}/${MAX_AUTO_RETRY}] Mencoba ulang ${accounts.length} akun...`);
         } else {
-            console.log(`\n?? [QUEUE] Memulai proses Auto Pay untuk ${accounts.length} akun...`);
+            addLog(`?? [START] Memulai proses Auto Pay untuk ${accounts.length} akun...`);
         }
         
-        const autopayProcess = spawn('xvfb-run', ['node', 'bot.min.js', '--auto']);
-
-        autopayProcess.stdout.on('data', (data) => {
-            process.stdout.write(data.toString()); 
+        // detached: true penting agar seluruh grup proses (xvfb + node + browser) bisa di-kill sekaligus
+        currentProcess = spawn('xvfb-run', ['-a', 'node', 'bot.min.js', '--auto'], {
+            cwd: __dirname,
+            detached: true
         });
 
-        autopayProcess.stderr.on('data', (data) => {
-            process.stderr.write(`[ERROR] ${data.toString()}`);
+        currentProcess.stdout.on('data', (data) => {
+            const lines = data.toString().split('\n');
+            lines.forEach(l => { if (l.trim()) addLog(l.trim()); });
         });
 
-        autopayProcess.on('close', (code) => {
-            console.log(`?? [AUTO PAY SELESAI] Proses berhenti dengan kode ${code}`);
+        currentProcess.stderr.on('data', (data) => {
+            const lines = data.toString().split('\n');
+            lines.forEach(l => { if (l.trim()) addLog(`[ERR] ${l.trim()}`); });
+        });
+
+        currentProcess.on('close', (code) => {
             isRunning = false;
+            currentProcess = null;
 
-            // CEK OTOMATIS: Apakah masih ada akun yang tersisa di AKUN.txt setelah bot selesai?
+            if (isManualStop) {
+                addLog(`?? [STOPPED] Proses telah dihentikan secara paksa oleh Admin.`);
+                return;
+            }
+
+            addLog(`?? [SELESAI] Proses berhenti dengan kode ${code}`);
+
             const sisaContent = fs.existsSync(akunFile) ? fs.readFileSync(akunFile, 'utf8') : "";
             const sisaAccounts = sisaContent.split('\n').map(a => a.trim()).filter(a => a && !a.startsWith('//'));
             
             if (sisaAccounts.length > 0) {
                 autoRetryCount++;
-                console.log(`? [QUEUE] Ditemukan ${sisaAccounts.length} sisa akun di AKUN.txt. Auto-Retry akan berjalan dalam 10 detik...`);
-                
-                // Jeda 10 detik agar tidak terdeteksi spam oleh YouTube, lalu ulangi proses
-                setTimeout(() => {
-                    runBotProcess(false);
-                }, 10000); 
+                addLog(`?? Ditemukan ${sisaAccounts.length} sisa akun di AKUN.txt. Auto-Retry dalam 10 detik...`);
+                retryTimeout = setTimeout(() => runBotProcess(false), 10000); 
             } else {
-                console.log(`? [QUEUE] Semua akun berhasil dieksekusi dengan bersih!`);
+                addLog(`? Semua akun di AKUN.txt berhasil dieksekusi dengan bersih!`);
                 autoRetryCount = 0; 
             }
         });
 
+        currentProcess.on('error', (err) => {
+            addLog(`? [PROCESS ERROR]: ${err.message}`);
+            isRunning = false;
+            currentProcess = null;
+        });
+
     } catch (err) {
-        console.error("? [QUEUE ERROR]:", err.message);
+        addLog(`? [QUEUE ERROR]: ${err.message}`);
         isRunning = false;
+        currentProcess = null;
     }
 }
 
-// [BARU] Endpoint GET Khusus untuk merespons Tombol "Tes Koneksi API" dari Web Panel
+// 1. Cek Koneksi & Status
 app.get('/api/trigger-autopay', (req, res) => {
-    res.json({ success: true, message: "Koneksi Web Panel ke VPS Berhasil!" });
+    res.json({ success: true, online: true, isRunning, message: "Koneksi Web Panel ke VPS Server B Berhasil!" });
 });
 
-// 1. Endpoint Utama: Menerima akun baru
-app.post('/api/trigger-autopay', (req, res) => {
-    if (req.headers['x-api-key'] !== API_SECRET) {
-        return res.status(401).json({ error: "Unauthorized" });
-    }
+// 2. Ambil Live Logs & Status Eksekusi
+app.get('/api/logs', (req, res) => {
+    res.json({ online: true, logs: liveLogs, isRunning });
+});
 
+// 3. Kontrol Start & Stop Proses Bot dari Web Panel
+app.post('/api/serverb/control', (req, res) => {
+    const { action } = req.body;
+    
+    if (action === 'start') {
+        if (isRunning) {
+            return res.json({ success: true, message: "Script Pay sedang berjalan saat ini." });
+        }
+        const content = fs.existsSync(akunFile) ? fs.readFileSync(akunFile, 'utf8') : '';
+        const accounts = content.split('\n').map(a => a.trim()).filter(a => a && !a.startsWith('//'));
+        if (accounts.length === 0) {
+            return res.status(400).json({ error: "AKUN.txt masih kosong! Isi akun terlebih dahulu." });
+        }
+        runBotProcess(true);
+        return res.json({ success: true, message: `Script Pay dijalankan untuk ${accounts.length} akun.` });
+    } 
+    else if (action === 'stop') {
+        isManualStop = true;
+        autoRetryCount = 0;
+
+        if (retryTimeout) {
+            clearTimeout(retryTimeout);
+            retryTimeout = null;
+        }
+
+        if (currentProcess && currentProcess.pid) {
+            try {
+                // Mematikan seluruh process group (xvfb + node + browser)
+                process.kill(-currentProcess.pid, 'SIGKILL');
+            } catch (e) {
+                try { currentProcess.kill('SIGKILL'); } catch (err) {}
+            }
+        }
+
+        // Sapu bersih sisa proses bot.min.js atau xvfb jika masih menyangkut di sistem Linux
+        exec("pkill -9 -f 'bot.min.js'; pkill -9 -f 'Xvfb'", () => {});
+
+        isRunning = false;
+        currentProcess = null;
+        addLog(`?? [ADMIN] Perintah STOP diterima dari Web Panel. Menghentikan paksa script pay...`);
+        return res.json({ success: true, message: "Script Pay di Server B berhasil dihentikan!" });
+    }
+    
+    res.status(400).json({ error: "Aksi tidak dikenal" });
+});
+
+// 4. Menerima Kiriman Akun Otomatis saat Order Sukses
+app.post('/api/trigger-autopay', (req, res) => {
     const accounts = req.body.accounts;
     if (!accounts || !Array.isArray(accounts) || accounts.length === 0) {
         return res.status(400).json({ error: "Data akun tidak valid" });
@@ -116,58 +189,54 @@ app.post('/api/trigger-autopay', (req, res) => {
 
     const formattedAccounts = accounts.map(acc => {
         const parts = acc.split(':');
-        return parts.length >= 2 ? `${parts[0].trim()} ${parts[1].trim()}` : acc;
+        return parts.length >= 2 ? `${parts[0].trim()} ${parts[1].trim()}` : acc.trim();
     }).join('\n') + '\n';
 
     try {
-        fs.appendFileSync(akunFile, formattedAccounts);
-        console.log(`\n?? [API] Menerima ${accounts.length} akun baru. Disimpan ke AKUN.txt.`);
+        fs.appendFileSync(akunFile, formattedAccounts, 'utf8');
+        addLog(`?? [ORDER MASUK] Menerima ${accounts.length} akun baru. Disimpan ke AKUN.txt.`);
     } catch (e) {
         return res.status(500).json({ error: "Gagal menulis ke file AKUN.txt" });
     }
 
     res.json({ success: true, message: "Akun berhasil diterima dan masuk antrean sistem." });
-    
-    // Picu sistem antrean & reset hitungan retry
     runBotProcess(true);
 });
 
-// 2. Endpoint Tambahan: Cek sisa akun di AKUN.txt
+// 5. Baca Isi File AKUN.txt untuk Editor Web Panel
 app.get('/api/check-failed', (req, res) => {
-    if (req.headers['x-api-key'] !== API_SECRET) {
-        return res.status(401).json({ error: "Unauthorized" });
-    }
-
     try {
         if (!fs.existsSync(akunFile)) {
-            return res.json({ accounts: [] });
+            fs.writeFileSync(akunFile, '', 'utf8');
+            return res.json({ rawContent: '', accounts: [] });
         }
         const content = fs.readFileSync(akunFile, 'utf8');
         const accounts = content.split('\n').map(a => a.trim()).filter(a => a && !a.startsWith('//'));
-        res.json({ accounts });
+        res.json({ rawContent: content, accounts });
     } catch (e) {
         res.status(500).json({ error: "Gagal membaca file AKUN.txt" });
     }
 });
 
-// 3. Endpoint Tambahan: Manual Retry Auto Pay dari Web Panel
-app.post('/api/retry-autopay', (req, res) => {
-    if (req.headers['x-api-key'] !== API_SECRET) {
-        return res.status(401).json({ error: "Unauthorized" });
+// 6. Simpan Perubahan Edit File AKUN.txt dari Web Panel
+app.post('/api/update-akun', (req, res) => {
+    try {
+        const { rawContent } = req.body;
+        if (rawContent === undefined) return res.status(400).json({ error: "Konten tidak valid" });
+        
+        // Pastikan format baris rapi dan diakhiri newline jika tidak kosong
+        const cleanContent = rawContent.trim() ? rawContent.trim() + '\n' : '';
+        fs.writeFileSync(akunFile, cleanContent, 'utf8');
+        
+        const count = cleanContent ? cleanContent.trim().split('\n').length : 0;
+        addLog(`?? [EDITOR] File AKUN.txt diperbarui melalui Web Panel (${count} baris).`);
+        res.json({ success: true, message: "File AKUN.txt berhasil disimpan." });
+    } catch (e) {
+        res.status(500).json({ error: "Gagal menyimpan file AKUN.txt" });
     }
-
-    if (!fs.existsSync(akunFile)) {
-        return res.json({ success: false, error: "File AKUN.txt tidak ditemukan" });
-    }
-
-    console.log(`?? [API] Web Panel meminta Manual Retry Auto Pay...`);
-    res.json({ success: true, message: "Retry Auto Pay dipicu." });
-    
-    // Picu sistem antrean & reset hitungan retry agar bisa berjalan maksimal lagi
-    runBotProcess(true);
 });
 
-// [BARU] Mengikat ke '0.0.0.0' agar aman diakses IP luar
-app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`?? Receiver API untuk Auto Pay aktif di port ${PORT}`);
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`?? Receiver API untuk Server B aktif di port ${PORT}`);
+    addLog(`?? Server B Receiver aktif dan siap menerima perintah.`);
 });
